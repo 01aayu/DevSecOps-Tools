@@ -15,9 +15,9 @@
     </parent>
 
     <groupId>com.example</groupId>
-    <artifactId>demo-backend</artifactId>
+    <artifactId>order-service</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>demo-backend</name>
+    <name>order-service</name>
     <description>Sample Spring Boot backend for SonarQube + Dependency-Track practice</description>
 
     <properties>
@@ -46,7 +46,6 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-
     </dependencies>
 
 
