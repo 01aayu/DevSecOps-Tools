@@ -58,6 +58,33 @@ services:
       - nexus_data:/nexus-data
     restart: unless-stopped
 
+  # ---------- JFrog Artifactory (Docker registry) ----------
+  artifactory-db:
+    image: postgres:13
+    container_name: artifactory-db
+    networks: [devsecops-net]
+    environment:
+      POSTGRES_DB: artifactory
+      POSTGRES_USER: artifactory
+      POSTGRES_PASSWORD: artifactory
+    volumes:
+      - artifactory_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+ 
+  
+  # ---------- JFrog Artifactory (Docker registry) ----------
+  artifactory:
+    image: releases-docker.jfrog.io/jfrog/artifactory-oss:latest
+    container_name: artifactory
+    networks: [devsecops-net]
+    depends_on: [artifactory-db]
+    ports:
+      - "8082:8082"   # Artifactory UI + REST API
+      - "8083:8083"   # Docker registry port (docker login/push target)
+    volumes:
+      - ./artifactory-data:/var/opt/jfrog/artifactory
+    restart: unless-stopped
+
 networks:
   devsecops-net:
     driver: bridge
@@ -69,3 +96,4 @@ volumes:
   # sonar_logs:
   # dtrack_data:
   nexus_data:
+  artifactory_db_data:
