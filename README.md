@@ -1,13 +1,16 @@
-# DevSecOps Tools — Angular + Spring Boot + Nexus (+ SonarQube / Dependency-Track, + JFrog coming next)
+# DevSecOps Tools
 
 This project is a hands-on practice environment for a full DevSecOps
 toolchain: **SAST** (SonarQube), **SCA** (Dependency-Track), **artifact
-management** (Nexus Repository), and — coming next — **container registry
-+ image scanning** (JFrog Artifactory).
+management** (Nexus Repository + JFrog Artifactory), and **Docker image
+registry + push** (Nexus, since Artifactory OSS doesn't support Docker
+— see Part G).
 
 > **Current status:** SonarQube and Dependency-Track are temporarily
-> commented out in `docker-compose.yml` while the Nexus leg is being
-> practiced. Steps for both are kept below for when they're re-enabled.
+> commented out in `docker-compose.yml`. Nexus (Maven, npm, and Docker
+> hosted repos) and Artifactory (Maven only, OSS licensing limit) are
+> both set up and working. Steps for SonarQube/DT are kept below for
+> when they're re-enabled.
 
 ```
 devsecops-tools/                 (repo, formerly Sonarqube_and_DT)
@@ -268,10 +271,90 @@ curl -X POST "http://localhost:8081/api/v1/bom" \
 
 ---
 
-## PART G — JFrog Artifactory (Docker registry) — *placeholder, next up*
+## PART G — JFrog Artifactory: what it can and can't do on OSS
 
-This section will cover pushing the Spring Boot backend image to
-Artifactory as a Docker repo. To be filled in once that leg is done.
+Artifactory OSS (Community Edition) was set up successfully as a
+second artifact manager alongside Nexus — same shared Docker network,
+its own Postgres backing database (required starting Artifactory 7.x;
+unlike Nexus, it no longer supports an embedded DB).
+
+**Important limitation learned the hard way:** Artifactory OSS only
+supports **Maven/Gradle/Ivy/SBT and generic repositories**. Docker, npm,
+Helm, PyPI, NuGet, Go, and most other package formats are **JFrog Pro
+(paid) features**, gated behind a license — attempting to create a
+Docker repo type on OSS fails outright. This is the single biggest
+practical difference from Nexus OSS, which supports Docker hosted repos
+for free.
+
+If you want to use Artifactory for anything, it's limited to the same
+Maven-artifact-hosting role Nexus already covers — not useful as a
+second registry for this project, so it's kept running (or can be
+stopped) purely as reference/comparison, not as an active part of the
+workflow below.
+
+> **Note:** actually pushing a Maven jar to Artifactory (via UI upload
+> or `mvn deploy`) was left undone in this pass — the container was slow
+> enough on this machine that it wasn't worth the wait for a
+> Maven-only capability Nexus already provides. The steps to do it are
+> documented above if picked up later.
+
+```bash
+# Artifactory + its Postgres can be stopped if not actively comparing:
+docker compose stop artifactory artifactory-db
+```
+
+---
+
+## PART H — Docker image registry: Nexus (the one that actually works for free)
+
+Since Artifactory OSS can't do Docker, the image registry leg of this
+practice uses **Nexus's Docker hosted repository** instead — same
+learning goal (build → tag → push → verify in a private registry),
+achieved with the free tier.
+
+### H1. Create the Docker hosted repo in Nexus
+
+UI → ⚙️ **Settings → Repository → Repositories → Create repository** →
+`docker (hosted)`
+- Name: `devsecops-docker`
+- HTTP connector port: `8084`
+
+`docker-compose.yml` exposes this via:
+```yaml
+ports:
+  - "8081:8081"   # Nexus UI + Maven/npm
+  - "8084:8084"   # Nexus Docker hosted repo
+```
+
+### H2. Dockerfile (`springboot-backend/Dockerfile`)
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-11 AS build
+WORKDIR /app
+COPY pom.xml .
+COPY src ./src
+RUN mvn clean package -DskipTests
+
+FROM eclipse-temurin:11-jre
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+### H3. Build, tag, push
+
+```bash
+cd springboot-backend
+docker build -t demo-backend:1.0.0 .
+docker tag demo-backend:1.0.0 localhost:8084/demo-backend:1.0.0
+docker login localhost:8084 -u admin -p <nexus-password>
+docker push localhost:8084/demo-backend:1.0.0
+```
+
+### H4. Verify
+
+Nexus UI → **Browse** → `devsecops-docker` → `demo-backend:1.0.0`
 
 ---
 
@@ -304,6 +387,21 @@ Artifactory as a Docker repo. To be filled in once that leg is done.
   must exactly match the repo names actually created in the Nexus UI —
   a typo here manifests as a deploy-time 404, after the build itself
   already succeeded
+- **Artifactory requires an external Postgres** → unlike Nexus, it
+  refuses to start against its embedded Derby DB from v7+; needs a
+  `system.yaml` pointing `shared.database` at a real Postgres container
+- **Artifactory bind-mount permission errors** → its container runs as
+  a non-root UID (`1030`); a fresh named/bind volume often isn't
+  writable by that user. `chmod -R 777` on the local data folder is a
+  pragmatic (non-production) fix
+- **Artifactory "entitlement fetch failed" / stuck-loading UI** → known
+  harmless OSS-edition noise; the real signal is
+  `curl http://localhost:8082/artifactory/api/system/ping` returning
+  `OK` — trust that over the browser spinner
+- **Artifactory has no Docker support on OSS** → confirmed by trying to
+  create a Docker repo type and having it rejected; this is a licensing
+  wall, not a bug. Nexus OSS's Docker hosted repo is the free
+  alternative used instead (Part H)
 
 ---
 
@@ -325,13 +423,34 @@ automatically instead of run by hand.
 
 ---
 
-## Cleanup — stop and remove everything
+## Full Cleanup — remove everything created in this project
 
+This tears down every container, volume, local data folder, and build
+artifact created while setting up Nexus and Artifactory. Run in order.
+
+### 1. Stop and remove all containers + named volumes
 ```bash
+cd "SQ&DT"
 docker compose down -v
 ```
+This removes: `nexus`, `artifactory`, `artifactory-db` containers, and
+their named volumes (`nexus_data`, `artifactory_db_data`) — all Nexus
+repo configs, users, and Artifactory's Postgres data are permanently
+deleted by this step.
 
-Remove local build artifacts:
+### 2. Remove the Artifactory bind-mounted data folder
+```bash
+sudo rm -rf ./artifactory-data
+```
+
+### 3. Remove locally built Docker images
+```bash
+docker rmi demo-backend:1.0.0
+docker rmi localhost:8084/demo-backend:1.0.0
+```
+(ignore "No such image" errors if you never got that far)
+
+### 4. Remove local build artifacts
 ```bash
 # from springboot-backend/ and other-service/
 rm -rf target
@@ -339,3 +458,24 @@ rm -rf target
 # from angular-frontend/
 rm -rf node_modules dist coverage .angular bom.json
 ```
+
+### 5. (Optional) Reclaim Docker disk space entirely
+Only run this if you're done with Docker experiments generally — it
+clears unused images/build cache across *all* your Docker projects, not
+just this one:
+```bash
+docker system prune -a --volumes
+```
+
+### 6. Confirm everything's gone
+```bash
+docker ps -a              # should show no nexus/artifactory containers
+docker volume ls          # should show no nexus_data/artifactory_db_data
+docker network ls | grep devsecops   # will disappear once no containers use it
+```
+
+After this, the project folder itself (source code, `pom.xml`,
+`docker-compose.yml`, etc.) is untouched — only the running
+infrastructure and generated build output are removed. Re-running
+`docker compose up -d` from Part A brings everything back from scratch
+whenever you want to resume.
